@@ -1,6 +1,21 @@
 const supabase = require("../db.js");
 const { logActivity } = require("./logActivity");
 
+// Helper function to determine batch status
+function getDynamicStatus(startDate, endDate) {
+  const now = new Date();
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+
+  if (now < start) {
+    return "Upcoming";
+  } else if (now >= start && now <= end) {
+    return "Active";
+  } else {
+    return "Completed";
+  }
+}
+
 const getAllFaculty = async (req, res) => {
   const { data, error } = await supabase
     .from("faculty")
@@ -15,7 +30,7 @@ const getAllFaculty = async (req, res) => {
       faculty_availability ( id, day_of_week, start_time, end_time )
     `);
 
-  if (error) {
+if (error){
     console.error("Error fetching faculty:", error);
     return res.status(500).json({ error: "Failed to fetch faculty" });
   }
@@ -108,7 +123,7 @@ const createFaculty = async (req, res) => {
     }
 
     // Log activity
-    await logActivity('Created', `Faculty "${name}"`, 'user'); // Replace "user" with actual user if available
+    await logActivity('Created', `Faculty \"${name}\"`, 'user'); // Replace "user" with actual user if available
 
     res.status(201).json(facultyData);
   } catch (error) {
@@ -122,7 +137,7 @@ const updateFaculty = async (req, res) => {
   const { name, phone_number, employment_type, skillIds } = req.body;
 
   try {
-    // 1. Update faculty details
+    // --- 1. Update faculty details (name, phone, etc.) ---
     const { data: facultyData, error: facultyError } = await supabase
       .from('faculty')
       .update({ name, phone_number, employment_type })
@@ -138,40 +153,61 @@ const updateFaculty = async (req, res) => {
       return res.status(404).json({ error: 'Faculty not found' });
     }
 
-    // 2. Update skills (delete old, insert new)
-    // This operation is not atomic. If the insert fails, the faculty will be left with no skills.
-    // For a robust solution, this should be done in a transaction.
-    const { error: deleteError } = await supabase
-      .from('faculty_skills')
-      .delete()
-      .eq('faculty_id', id);
+    // --- 2. Update skills (if provided) ---
+    if (skillIds) {
+        const { error: deleteError } = await supabase
+            .from('faculty_skills')
+            .delete()
+            .eq('faculty_id', id);
 
-    if (deleteError) {
-      throw deleteError;
-    }
+        if (deleteError) throw deleteError;
 
-    if (skillIds && skillIds.length > 0) {
-      const facultySkills = skillIds.map((skill_id) => ({
-        faculty_id: id,
-        skill_id,
-      }));
-
-      const { error: insertError } = await supabase
-        .from('faculty_skills')
-        .insert(facultySkills);
-
-      if (insertError) {
-        if (insertError.code === '23503') {
-          return res.status(400).json({ error: 'One or more skill IDs are invalid.' });
+        if (skillIds.length > 0) {
+            const facultySkills = skillIds.map((skill_id) => ({
+                faculty_id: id,
+                skill_id,
+            }));
+            const { error: insertError } = await supabase
+                .from('faculty_skills')
+                .insert(facultySkills);
+            if (insertError) {
+                if (insertError.code === '23503') {
+                    return res.status(400).json({ error: 'One or more skill IDs are invalid.' });
+                }
+                throw insertError;
+            }
         }
-        throw insertError;
-      }
     }
 
-    // Log activity
-    await logActivity('Updated', `Faculty "${facultyData.name}"`, 'user'); // Replace "user" with actual user if available
+    // --- 4. Log and Respond ---
+    await logActivity('Updated', `Faculty \"${facultyData.name}\"`, 'user');
 
-    res.status(200).json(facultyData);
+    // Refetch the updated faculty data to include everything
+    const { data: updatedFaculty, error: refetchError } = await supabase
+        .from("faculty")
+        .select(`
+            id, name, email, phone_number, employment_type, is_active,
+            skills ( id, name ),
+            faculty_availability ( id, day_of_week, start_time, end_time )
+        `)
+        .eq('id', id)
+        .single();
+
+    if(refetchError) throw refetchError;
+
+    const transformedData = {
+        id: updatedFaculty.id,
+        name: updatedFaculty.name,
+        email: updatedFaculty.email,
+        phone_number: updatedFaculty.phone_number,
+        type: updatedFaculty.employment_type,
+        isActive: updatedFaculty.is_active,
+        skills: updatedFaculty.skills || [],
+        availability: updatedFaculty.faculty_availability || []
+    };
+
+    res.status(200).json(transformedData);
+
   } catch (error) {
     console.error('Error updating faculty:', error);
     res.status(500).json({ error: 'Failed to update faculty' });
@@ -182,6 +218,23 @@ const deleteFaculty = async (req, res) => {
   const { id } = req.params;
 
   try {
+    // Check if faculty is assigned to any batches
+    const { data: batches, error: batchesError } = await supabase
+      .from('batches')
+      .select('id')
+      .eq('faculty_id', id)
+      .limit(1);
+
+    if (batchesError) {
+      throw batchesError;
+    }
+
+    if (batches && batches.length > 0) {
+      return res.status(400).json({
+        error: 'Cannot delete faculty with assigned batches. Please reassign batches first.',
+      });
+    }
+
     // Find the user associated with the faculty
     const { data: userData, error: userError } = await supabase
       .from('users')
@@ -219,11 +272,11 @@ const deleteFaculty = async (req, res) => {
     }
 
     if (!faculty) {
-      return res.status(404).json({ error: 'Faculty not found' });
+      return res.status(44).json({ error: 'Faculty not found' });
     }
 
     // Log activity
-    await logActivity('Deleted', `Faculty "${faculty.name}"`, 'user');
+    await logActivity('Deleted', `Faculty \"${faculty.name}\"`, 'user');
 
     res.status(204).send();
   } catch (error) {
@@ -232,4 +285,120 @@ const deleteFaculty = async (req, res) => {
   }
 };
 
-module.exports = { getAllFaculty, createFaculty, updateFaculty, deleteFaculty };
+// ** CORRECTED FUNCTION **
+const getFacultyActiveStudents = async (req, res) => {
+  try {
+    // 1. Get all faculties and their related batches and students in one go
+    const { data: faculties, error } = await supabase
+      .from("faculty")
+      .select(`
+        id,
+        name,
+        batches (
+          id,
+          start_date,
+          end_date,
+          batch_students ( student_id )
+        )
+      `);
+
+    if (error) throw error;
+
+    // 2. Process the data in JavaScript
+    const facultyData = faculties.map(faculty => {
+      const uniqueStudentIds = new Set();
+      
+      // Iterate over each faculty's batches
+      (faculty.batches || []).forEach(batch => {
+        // Check if the batch is active
+        const status = getDynamicStatus(batch.start_date, batch.end_date);
+        if (status === "Active") {
+          // If active, add all its students to the Set
+          // The Set automatically handles duplicates
+          (batch.batch_students || []).forEach(student => {
+            uniqueStudentIds.add(student.student_id);
+          });
+        }
+      });
+
+      // The size of the Set is the total number of unique active students
+      return {
+        faculty_id: faculty.id,
+        faculty_name: faculty.name,
+        active_students: uniqueStudentIds.size,
+      };
+    });
+
+    res.status(200).json(facultyData);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const getFacultyTotalStudents = async (req, res) => {
+  const { faculty_id } = req.params;
+
+  if (!faculty_id) {
+    return res.status(400).json({ error: "Faculty ID is required" });
+  }
+
+  try {
+    // Call the database function
+    const { data, error } = await supabase.rpc(
+      'get_faculty_unique_student_count', 
+      { faculty_uuid: faculty_id } // Pass the argument
+    );
+
+    if (error) {
+      throw error;
+    }
+
+    res.status(200).json({ total_students: data });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ** NEW FUNCTION **
+const getFacultyStudentCounts = async (req, res) => {
+  try {
+    // 1. Get all faculties
+    const { data: faculties, error: facultyError } = await supabase
+      .from("faculty")
+      .select("id, name");
+
+    if (facultyError) throw facultyError;
+
+    // 2. For each faculty, call the RPC to get the count
+    const counts = await Promise.all(
+      faculties.map(async (faculty) => {
+        const { data: count, error: rpcError } = await supabase.rpc(
+          'get_faculty_unique_student_count', 
+          { faculty_uuid: faculty.id }
+        );
+        
+        if (rpcError) {
+           console.error(`Error fetching count for faculty ${faculty.id}:`, rpcError);
+           return { faculty_id: faculty.id, name: faculty.name, total_students: 0 };
+        }
+        
+        return { faculty_id: faculty.id, name: faculty.name, total_students: count };
+      })
+    );
+
+    res.status(200).json(counts);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+
+module.exports = {
+  getAllFaculty,
+  createFaculty,
+  updateFaculty,
+  deleteFaculty,
+  getFacultyActiveStudents,
+  getFacultyTotalStudents,
+  getFacultyStudentCounts, // <-- Added new function
+};
